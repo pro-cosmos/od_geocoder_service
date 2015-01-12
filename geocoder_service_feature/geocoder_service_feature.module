@@ -1,0 +1,7 @@
+<?php
+/**
+ * @file
+ * Code for the Geocoder service feature feature.
+ */
+
+include_once 'geocoder_service_feature.features.inc';

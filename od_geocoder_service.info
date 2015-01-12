@@ -1,0 +1,7 @@
+name = Geocoder service
+description = "Provide geocoding adrresses files and sending link to download result file"
+package = "Gosbook"
+core = 7.x
+dependencies[] = rules
+dependencies[] = entityform
+

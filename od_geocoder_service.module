@@ -1,0 +1,128 @@
+<?php
+
+define('OD_GEOCODER_SERVICE_STATUS_NEW', 0);
+define('OD_GEOCODER_SERVICE_STATUS_INWORK', 1);
+define('OD_GEOCODER_SERVICE_STATUS_COMPLETE', 2);
+
+define('OD_GEOCODER_SERVICE_COLLECTION', 'geocoder_service_files');
+
+define('OD_GEOCODER_SERVICE_CRON_PERIOD', 60 * 3); //3 min
+define('OD_GEOCODER_SERVICE_EXPIRE_PERIOD', 60 * 60 * 6); //6 hours
+define('OD_GEOCODER_SERVICE_CRON_MAIL_SEND_LIMIT', 5);
+
+/**
+ * Implement of hook_menu()
+ */
+function od_geocoder_service_menu() {
+  $items = array();
+  $items['download_geocoded_file/%'] = array(
+    'page callback' => 'od_geocoder_service_download_file',
+    'page arguments' => array(1),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_cron().
+ */
+function od_geocoder_service_cron() {
+  $cron_last = variable_get(__FUNCTION__ . '-last-run', 0);
+
+  if (time() - $cron_last > OD_GEOCODER_SERVICE_CRON_PERIOD) {
+    module_load_include('inc', 'od_geocoder_service', 'includes/od_geocoder_service');
+    od_common_include_library('mongodb');
+
+    //geocode some files
+    od_geocoder_service_cron_worker();
+    //set messages
+    od_geocoder_service_cron_mailnotify_worker();
+
+    variable_set(__FUNCTION__ . '-last-run', time());
+    watchdog('od_geocoder_service', 'Cron run');
+  }
+}
+
+/**
+ *
+ */
+function od_geocoder_service_cron_worker() {
+  $filter = array('status' => array('$lt' => OD_GEOCODER_SERVICE_STATUS_COMPLETE));
+  $obj = odMongodb::init(OD_GEOCODER_SERVICE_COLLECTION)->findOne($filter);
+  if ($obj) {
+    //Let modules alter file object
+    drupal_alter('od_geocoder_service_file_geocode', $obj);
+
+    if (!empty($obj['address_output']) && is_array($obj['address_output'])) {
+      $obj['status'] = OD_GEOCODER_SERVICE_STATUS_COMPLETE;
+      $obj['date_expire'] = time() + OD_GEOCODER_SERVICE_EXPIRE_PERIOD;
+    }
+
+    //update file object
+    odMongodb::init(OD_GEOCODER_SERVICE_COLLECTION)->update('fid', $obj);
+  }
+}
+
+/**
+ * Send mail of file geocoding complete
+ */
+function od_geocoder_service_cron_mailnotify_worker() {
+  $find = array('status' => OD_GEOCODER_SERVICE_STATUS_COMPLETE);
+  $res = odMongodb::init(OD_GEOCODER_SERVICE_COLLECTION)->select($find, OD_GEOCODER_SERVICE_CRON_MAIL_SEND_LIMIT);
+  if ($res) {
+    foreach ($res as $obj) {
+      //по очрееди высылаем письма раскодированных файлов
+      drupal_mail('od_geocoder_service', 'notify_of_file_geocoding_complete', $obj['email'], language_default(), $obj);
+    }
+  }
+}
+
+/**
+ * Implements hook_mail().
+ */
+function od_geocoder_service_mail($key, &$message, $obj) {
+  if ($key == 'notify_of_file_geocoding_complete') {
+
+    $body = t('Your address file geocoding complete.') . PHP_EOL;
+    $body .= t('You can get it from @link.', array('@link' => l(('Download'), url('download_geocoded_file/' . $obj['hash'], array('absolute' => true))))) . PHP_EOL;
+    $body .= t('Remember link will be available during @hours hours.', array('@hours' => OD_GEOCODER_SERVICE_EXPIRE_PERIOD / 3600));
+
+    $message['subject'] = t('Geocoding of adress file complete.');
+    $message['body'][] = $body;
+  }
+}
+
+/**
+ * Callback for csv geocoded file output
+ */
+function od_geocoder_service_download_file($hash) {
+  od_common_include_library('mongodb');
+
+  $hash = check_plain($hash);
+  $find = array('hash' => $hash, 'status' => OD_GEOCODER_SERVICE_STATUS_COMPLETE);
+  $obj = odMongodb::init(OD_GEOCODER_SERVICE_COLLECTION)->findOne($find);
+  if ($obj) {
+    //check if link is expiry
+    if ($obj['date_expire']->sec < time()) {
+      echo t('Sorry, link to the file has expired.');
+      exit;
+    }
+
+    $csv = "Address; Lat; Lon\n";
+    $array = $obj['address_output'];
+    foreach ($array as $address => $data) {
+      $csv.= implode(';', array($address, $data['Lat'], $data['Lon'])) . "\n";
+    }
+    // Output to browser with appropriate mime type, you choose ;)
+    header("Content-type: text/x-csv");
+    header("Content-type: text/csv");
+    header("Content-type: application/csv");
+    header('Content-Type: text/xml, charset=UTF-8; encoding=UTF-8');
+    header("Content-Disposition: attachment; filename=geocoded_address_" . $obj['fid'] . ".csv");
+    echo $csv;
+    exit;
+  }
+  //get file object and output
+}
+
